@@ -1,5 +1,5 @@
-CC = gcc
-CFLAGS = -Wall -c `pkg-config --cflags sdl2` -Wall -O3
+CXX = g++
+CXXFLAGS = -Wall -c `pkg-config --cflags sdl2` -Wall -O3
 LDFLAGS = `pkg-config --libs sdl2` -lm -lpthread -O3
 EXE = pixel
 
@@ -15,10 +15,10 @@ INFO = $(IP):$(PORT) $(PIXEL_WIDTH)x$(PIXEL_HEIGHT)
 all: $(EXE)
 
 $(EXE): main.o
-	$(CC) -o $@ main.o $(LDFLAGS)
+	$(CXX) -o $@ main.o $(LDFLAGS)
 
-main.o: main.c
-	$(CC) $(CFLAGS) $(DEFINES) $< -o $@
+main.o: main.cpp
+	$(CXX) $(CXXFLAGS) $(DEFINES) $< -o $@
 
 clean:
 	rm -rf *.o $(EXE)

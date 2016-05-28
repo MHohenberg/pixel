@@ -140,10 +140,11 @@ void * handle_clients(void * foobar){
       perror("socket() failed");
       return 0;
    }
-   
-   if (setsockopt(server_sock, SOL_SOCKET, SO_REUSEADDR, &(int){ 1 }, sizeof(int)) < 0)
+
+   int one = 1;
+   if (setsockopt(server_sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(int)) < 0)
       printf("setsockopt(SO_REUSEADDR) failed\n");
-   if (setsockopt(server_sock, SOL_SOCKET, SO_REUSEPORT, &(int){ 1 }, sizeof(int)) < 0)
+   if (setsockopt(server_sock, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(int)) < 0)
       printf("setsockopt(SO_REUSEPORT) failed\n");
 
    int retries;
@@ -197,7 +198,7 @@ int main(){
       return 1;
    }
    
-   pixels = calloc(PIXEL_WIDTH * PIXEL_HEIGHT * 4, 1);
+   pixels = (uint32_t*)calloc(PIXEL_WIDTH * PIXEL_HEIGHT * 4, 1);
 
    pthread_t thread_id;
    if(pthread_create(&thread_id , NULL, handle_clients , NULL) < 0){
