@@ -1,10 +1,14 @@
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <SDL.h>
+
+#include <boost/asio.hpp>
+#include <iostream>
+#include <memory>
+#include <utility>
+
+namespace asio = boost::asio;
+using boost::asio::ip::tcp;
 
 #define BUFSIZE 2048
 
@@ -12,12 +16,7 @@
 #define STR(a) XSTR(a)
 
 uint32_t* pixels;
-volatile int running = 1;
-volatile int client_thread_count = 0;
-volatile int server_sock;
-
-void * handle_client(void *);
-void * handle_clients(void *);
+volatile int client_count = 0;
 
 void set_pixel(uint16_t x, uint16_t y, uint32_t c, uint8_t a)
 {
@@ -42,141 +41,141 @@ void set_pixel(uint16_t x, uint16_t y, uint32_t c, uint8_t a)
    }
 }
 
-void * handle_client(void *s){
-   client_thread_count++;
-   int sock = *(int*)s;
-   char buf[BUFSIZE];
-   int read_size, read_pos = 0;
-   uint32_t x,y,c;
-   while(running && (read_size = recv(sock , buf + read_pos, sizeof(buf) - read_pos , 0)) > 0){
-      read_pos += read_size;
-      int found = 1;
-      while (found){
-         found = 0;
-         for (int i = 0; i < read_pos; i++){
-            if (buf[i] == '\n'){
-               buf[i] = 0;
-#if 1 // mit alpha, aber ggf. instabil
-               if(!strncmp(buf, "PX ", 3)){ // ...frag nicht :D...
-                  char *pos1 = buf + 3;
-                  x = strtoul(buf + 3, &pos1, 10);
-                  if(buf != pos1){
-                     pos1++;
-                     char *pos2 = pos1;
-                     y = strtoul(pos1, &pos2, 10);
-                     if(pos1 != pos2){
-                        pos2++;
-                        pos1 = pos2;
-                        c = strtoul(pos2, &pos1, 16);
-                        if(pos2 != pos1){
-                           uint8_t a = 255;
-                           if((pos1 - pos2) > 6){ // contains alpha
-                              a = c & 0xff;
-                              c >>= 8;
-                           }
-                           set_pixel(x,y,c,a);
-                        }
-                     }
-                  }
-               }
-#else // ohne alpha
-               if(sscanf(buf,"PX %u %u %x",&x,&y,&c) == 3){
-                  set_pixel(x,y,c, 0xff);
-               }
-#endif
-               else if(!strncmp(buf, "SIZE", 4)){
-                  static const char out[] = "SIZE " STR(PIXEL_WIDTH) " " STR(PIXEL_HEIGHT) "\n";
-                  send(sock, out, sizeof(out), MSG_DONTWAIT | MSG_NOSIGNAL);
-               }
-               else{
-                  printf("QUATSCH[%i]: ", i);
-                  for (int j = 0; j < i; j++)
-                     printf("%c", buf[j]);
-                  printf("\n");
-               }
-               int offset = i + 1;
-               int count = read_pos - offset;
-               if (count > 0)
-                  memmove(buf, buf + offset, count); // TODO: ring buffer?
-               read_pos -= offset;
-               found = 1;
-               break;
+void parse_line(const char* buf, size_t size){
+    uint32_t x,y,c;
+
+#if 0 // mit alpha, aber ggf. instabil
+    if(!strncmp(buf, "PX ", 3)){ // ...frag nicht :D...
+        char *pos1 = buf + 3;
+        x = strtoul(buf + 3, &pos1, 10);
+        if(buf != pos1){
+            pos1++;
+            char *pos2 = pos1;
+            y = strtoul(pos1, &pos2, 10);
+            if(pos1 != pos2){
+                pos2++;
+                pos1 = pos2;
+                c = strtoul(pos2, &pos1, 16);
+                if(pos2 != pos1){
+                    uint8_t a = 255;
+                    if((pos1 - pos2) > 6){ // contains alpha
+                        a = c & 0xff;
+                        c >>= 8;
+                    }
+                    set_pixel(x,y,c,a);
+                }
             }
-         }
-         if (sizeof(buf) - read_pos == 0){ // received only garbage for a whole buffer. start over!
-            buf[sizeof(buf) - 1] = 0;
-            printf("GARBAGE BUFFER: %s\n", buf);
-            read_pos = 0;
-         }
-      }
-   }
-   close(sock);
-   printf("Client disconnected\n");
-   fflush(stdout);
-   client_thread_count--;
-   return 0;
+        }
+    }
+#else // ohne alpha
+    if(sscanf(buf,"PX %u %u %x",&x,&y,&c) == 3){
+        set_pixel(x,y,c, 0xff);
+    }
+#endif
+    else if(!strncmp(buf, "SIZE", 4)){
+        // static const char out[] = "SIZE " STR(PIXEL_WIDTH) " " STR(PIXEL_HEIGHT) "\n";
+        // send(sock, out, sizeof(out), MSG_DONTWAIT | MSG_NOSIGNAL);
+    }
+    else {
+        printf("QUATSCH[%zu]: ", size);
+        for (uint32_t j = 0; j < size; j++)
+            printf("%c", buf[j]);
+        printf("\n");
+    }
 }
 
-void * handle_clients(void * foobar){
-   pthread_t thread_id;
-   int client_sock;
-   socklen_t addr_len;
-   struct sockaddr_in addr;
-   addr_len = sizeof(addr);
-   struct timeval tv;
-   
-   printf("Starting Server...\n");
-   
-   server_sock = socket(PF_INET, SOCK_STREAM, 0);
+class pixel_client : public std::enable_shared_from_this<pixel_client>
+{
+public:
+    pixel_client(tcp::socket socket)
+        : socket_(std::move(socket)) { }
 
-   tv.tv_sec = 2;
-   tv.tv_usec = 0;
+    void start()
+    {
+        do_read_line();
+    }
 
-   addr.sin_addr.s_addr = INADDR_ANY;
-   addr.sin_port = htons(PORT);
-   addr.sin_family = AF_INET;
-   
-   if (server_sock == -1){
-      perror("socket() failed");
-      return 0;
-   }
+    void do_read_line()
+    {
+        /* used to keep reference count to client object */
+        auto self(shared_from_this());
+        boost::asio::async_read_until(
+            socket_, buffer_, '\n',
+            [this, self](boost::system::error_code ec, std::size_t /* length */)
+            {
+                std::istream input(&buffer_);
+                std::string line;
+                std::getline(input, line, '\n');
+                parse_line(line.data(), line.size());
 
-   int one = 1;
-   if (setsockopt(server_sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(int)) < 0)
-      printf("setsockopt(SO_REUSEADDR) failed\n");
-   if (setsockopt(server_sock, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(int)) < 0)
-      printf("setsockopt(SO_REUSEPORT) failed\n");
+                if (!ec) {
+                    do_read_line();
+                }
+                else {
+                    /* client died */
+                    --client_count;
+                    std::cout << "dead client removed"
+                              << " now only " << client_count << " clients"
+                              << std::endl;
+                }
+            });
+    }
 
-   int retries;
-   for (retries = 0; bind(server_sock, (struct sockaddr*)&addr, sizeof(addr)) == -1 && retries < 10; retries++){
-      perror("bind() failed ...retry in 5s");
-      usleep(5000000);
-   }
-   if (retries == 10)
-      return 0;
+    tcp::socket socket_;
+    boost::asio::streambuf buffer_;
+};
 
-   if (listen(server_sock, 3) == -1){
-      perror("listen() failed");
-      return 0;
-   }
-   printf("Listening...\n");
-   
-   setsockopt(server_sock, SOL_SOCKET, SO_SNDTIMEO, (char *)&tv,sizeof(struct timeval));
-   setsockopt(server_sock, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv,sizeof(struct timeval));
+//----------------------------------------------------------------------
 
-   while(running){
-      client_sock = accept(server_sock, (struct sockaddr*)&addr, &addr_len);
-      if(client_sock > 0){
-         printf("Client %s connected\n", inet_ntoa(addr.sin_addr));
-         if( pthread_create( &thread_id , NULL ,  handle_client , (void*) &client_sock) < 0)
-         {
-            close(client_sock);
-            perror("could not create thread");
-         }
-      }
-   }
-   close(server_sock);
-   return 0;
+class pixel_server
+{
+public:
+    pixel_server(asio::io_service& io_service,
+                const tcp::endpoint& endpoint)
+        : acceptor_(io_service),
+          socket_(io_service)
+    {
+        acceptor_.open(endpoint.protocol());
+        acceptor_.set_option(
+            asio::socket_base::reuse_address(true));
+        acceptor_.bind(endpoint);
+        acceptor_.listen();
+
+        do_accept();
+    }
+
+private:
+    void do_accept()
+    {
+        acceptor_.async_accept(
+            socket_, [this](boost::system::error_code ec)
+            {
+                if (!ec) {
+                    ++client_count;
+                    std::cout << "new client "
+                              << socket_.remote_endpoint().address().to_string()
+                              << " currently " << client_count << " clients"
+                              << std::endl;
+                    std::make_shared<pixel_client>(std::move(socket_))->start();
+                }
+
+                do_accept();
+            });
+    }
+
+    tcp::acceptor acceptor_;
+    tcp::socket socket_;
+};
+
+asio::io_service io_service;
+
+void * handle_clients(void * foobar)
+{
+    tcp::endpoint endpoint(tcp::v4(), PORT);
+    pixel_server server(io_service, endpoint);
+
+    io_service.run();
+    return 0;
 }
 
 int main(){
@@ -231,12 +230,9 @@ int main(){
       }
    }
 
-   running = 0;
    printf("Shutting Down...\n");
    SDL_DestroyWindow(window);
-   while (client_thread_count)
-      usleep(100000);
-   close(server_sock);
+   io_service.stop();
    pthread_join(thread_id, NULL);
    free(pixels);
    SDL_Quit();
